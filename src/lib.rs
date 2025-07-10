@@ -1,24 +1,21 @@
+#![feature(test)]
+extern crate test;
+
 // use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
 
 #[derive(Default)]
-enum Bucket<K: Eq, V> {
+enum Bucket<K, V> {
     #[default]
     Unoccupied,
     Deleted,
-    Occupied(Pair<K, V>),
+    Occupied(Entry<K, V>),
 }
 
-#[derive(Eq, Clone)]
-struct Pair<K, V> {
+struct Entry<K, V> {
     key: K,
     value: V,
-}
-
-impl<K: Eq, V> PartialEq for Pair<K, V> {
-    fn eq(&self, other: &Self) -> bool {
-        return self.key == other.key;
-    }
+    hash: u64,
 }
 
 pub struct HashMap<K, V>
@@ -31,7 +28,7 @@ where
 
 impl<K, V> HashMap<K, V>
 where
-    K: Hash + Eq + PartialEq + std::fmt::Debug,
+    K: Hash + Eq + PartialEq,
 {
     pub fn new() -> Self {
         Self::default()
@@ -43,19 +40,21 @@ where
         let mut hasher = DefaultHasher::new();
         key.hash(&mut hasher);
         let hash = hasher.finish();
-        let mut bucket = hash as usize % self.buckets.len();
+        let mut pos = hash as usize % self.buckets.len();
 
-        // linear search for unoccupied bucket
-        while let Bucket::Occupied(p) = &self.buckets[bucket]
+        // quadratic probing for unoccupied bucket
+        let mut probe_count = 0usize;
+        while let Bucket::Occupied(p) = &self.buckets[pos]
             && p.key != key
         {
-            bucket = (bucket + 1) % self.buckets.len();
+            probe_count += 1;
+            pos = (pos + probe_count.pow(2)) % self.buckets.len();
         }
 
         self.len += 1;
         let existing = std::mem::replace(
-            &mut self.buckets[bucket],
-            Bucket::Occupied(Pair { key, value }),
+            &mut self.buckets[pos],
+            Bucket::Occupied(Entry { key, value, hash }),
         );
 
         match existing {
@@ -68,24 +67,26 @@ where
         let mut hasher = DefaultHasher::new();
         key.hash(&mut hasher);
         let hash = hasher.finish();
-        let expected_bucket = hash as usize % self.buckets.len();
+        let expected_pos = hash as usize % self.buckets.len();
 
-        // linear search for bucket
-        let mut bucket = expected_bucket;
+        // quadratic probing for bucket
+        let mut pos = expected_pos;
+        let mut probe_count = 0usize;
         loop {
-            match &self.buckets[bucket] {
+            probe_count += 1;
+            match &self.buckets[pos] {
                 Bucket::Unoccupied => return None,
-                Bucket::Deleted => bucket = (bucket + 1) % self.buckets.len(),
+                Bucket::Deleted => pos = (pos + probe_count.pow(2)) % self.buckets.len(),
                 Bucket::Occupied(p) => {
                     if key == &p.key {
                         return Some(&p.value);
                     }
-                    bucket = (bucket + 1) % self.buckets.len()
+                    pos = (pos + probe_count.pow(2)) % self.buckets.len()
                 }
             }
 
             // we went through the full map
-            if bucket == expected_bucket {
+            if pos == expected_pos {
                 break;
             }
         }
@@ -96,28 +97,29 @@ where
         let mut hasher = DefaultHasher::new();
         key.hash(&mut hasher);
         let hash = hasher.finish();
-        let expected_bucket = hash as usize % self.buckets.len();
+        let expected_pos = hash as usize % self.buckets.len();
 
-        // linear search for bucket
-        let mut bucket = expected_bucket;
+        // quadratic probing for bucket
+        let mut pos = expected_pos;
+        let mut probe_count = 0usize;
         loop {
-            match &self.buckets[bucket] {
+            probe_count += 1;
+            match &self.buckets[pos] {
                 Bucket::Unoccupied => return None,
-                Bucket::Deleted => bucket = (bucket + 1) % self.buckets.len(),
+                Bucket::Deleted => pos = (pos + probe_count.pow(2)) % self.buckets.len(),
                 Bucket::Occupied(p) => {
                     if key == &p.key {
-                        let existing =
-                            std::mem::replace(&mut self.buckets[bucket], Bucket::Deleted);
+                        let existing = std::mem::replace(&mut self.buckets[pos], Bucket::Deleted);
                         if let Bucket::Occupied(p) = existing {
                             return Some(p.value);
                         }
                     }
-                    bucket = (bucket + 1) % self.buckets.len()
+                    pos = (pos + probe_count.pow(2)) % self.buckets.len()
                 }
             }
 
             // we went through the full map
-            if bucket == expected_bucket {
+            if pos == expected_pos {
                 break;
             }
         }
@@ -125,7 +127,9 @@ where
     }
 
     pub fn ensure_capacity(&mut self) {
-        if self.len == self.buckets.len() {
+        const LOAD_FACTOR_MAX: u64 = 65;
+        let load_factor = self.len * 100 / self.buckets.len();
+        if load_factor as u64 >= LOAD_FACTOR_MAX {
             let mut new_buckets = Vec::with_capacity(self.buckets.len() * 2);
             new_buckets.resize_with(self.buckets.len() * 2, || Bucket::Unoccupied);
             let old_buckets = std::mem::replace(&mut self.buckets, new_buckets);
@@ -147,6 +151,10 @@ where
     pub fn len(&self) -> usize {
         self.len
     }
+
+    pub fn iter<'a>(&'a self) -> Iter<'a, K, V> {
+        self.into_iter()
+    }
 }
 
 impl<K: Hash + Eq, V> Default for HashMap<K, V> {
@@ -156,9 +164,81 @@ impl<K: Hash + Eq, V> Default for HashMap<K, V> {
         Self { buckets, len: 0 }
     }
 }
+
+impl<'a, K: Hash + PartialEq + Eq, V> IntoIterator for &'a HashMap<K, V> {
+    type Item = Pair<&'a K, &'a V>;
+
+    type IntoIter = Iter<'a, K, V>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        Iter {
+            buckets: self.buckets.iter(),
+        }
+    }
+}
+
+pub struct Iter<'a, K, V> {
+    buckets: std::slice::Iter<'a, Bucket<K, V>>,
+}
+
+impl<'a, K, V> Iterator for Iter<'a, K, V> {
+    type Item = Pair<&'a K, &'a V>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while let Some(bucket) = self.buckets.next() {
+            if let Bucket::Occupied(item) = bucket {
+                return Some(Pair {
+                    key: &item.key,
+                    value: &item.value,
+                });
+            }
+        }
+        None
+    }
+}
+
+impl<K: Hash + PartialEq + Eq, V> IntoIterator for HashMap<K, V> {
+    type Item = Pair<K, V>;
+
+    type IntoIter = IntoIter<K, V>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        IntoIter {
+            buckets: self.buckets.into_iter(),
+        }
+    }
+}
+
+pub struct IntoIter<K, V> {
+    buckets: std::vec::IntoIter<Bucket<K, V>>,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct Pair<K, V> {
+    pub key: K,
+    pub value: V,
+}
+
+impl<K, V> Iterator for IntoIter<K, V> {
+    type Item = Pair<K, V>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while let Some(bucket) = self.buckets.next() {
+            if let Bucket::Occupied(item) = bucket {
+                return Some(Pair {
+                    key: item.key,
+                    value: item.value,
+                });
+            }
+        }
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use test::Bencher;
 
     #[test]
     fn test_insert_many() {
@@ -169,6 +249,26 @@ mod tests {
         for i in 0..1_0000 {
             map.insert(i.to_string(), i);
         }
+    }
+
+    #[bench]
+    fn bench_insert_many(b: &mut Bencher) {
+        let mut map = HashMap::new();
+        b.iter(|| {
+            for i in 0..1_00000 {
+                map.insert(i.to_string(), i);
+            }
+        });
+    }
+
+    #[bench]
+    fn bench_insert_many_std(b: &mut Bencher) {
+        let mut map = std::collections::HashMap::new();
+        b.iter(|| {
+            for i in 0..1_00000 {
+                map.insert(i.to_string(), i);
+            }
+        });
     }
 
     #[test]
@@ -264,5 +364,52 @@ mod tests {
             map.get(&"1".to_string()),
             "finds inserted element"
         );
+    }
+
+    #[test]
+    fn test_into_iter() {
+        // given
+        let mut want_pairs: Vec<_> = (0..1_0000)
+            .map(|i| Pair {
+                key: i.to_string(),
+                value: i,
+            })
+            .collect();
+
+        let mut map = HashMap::new();
+        for p in want_pairs.iter() {
+            map.insert(p.key.clone(), p.value);
+        }
+
+        // when
+        let mut got_pairs: Vec<_> = map.into_iter().collect();
+
+        // then
+        want_pairs.sort_by(|a, b| a.key.cmp(&b.key));
+        got_pairs.sort_by(|a, b| a.key.cmp(&b.key));
+        assert_eq!(want_pairs, got_pairs);
+    }
+
+    #[test]
+    fn test_iter() {
+        // given
+        let mut map = HashMap::new();
+        for i in 0..1_0000 {
+            map.insert(i.to_string(), i);
+        }
+
+        // when
+        let got_pairs: Vec<_> = map.iter().collect();
+
+        // then
+        for i in 0..1_0000 {
+            assert_eq!(
+                got_pairs.contains(&Pair {
+                    key: &i.to_string(),
+                    value: &i
+                }),
+                true
+            );
+        }
     }
 }
