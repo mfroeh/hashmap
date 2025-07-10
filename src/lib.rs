@@ -15,7 +15,6 @@ enum Bucket<K, V> {
 struct Entry<K, V> {
     key: K,
     value: V,
-    hash: u64,
 }
 
 pub struct HashMap<K, V>
@@ -54,7 +53,7 @@ where
         self.len += 1;
         let existing = std::mem::replace(
             &mut self.buckets[pos],
-            Bucket::Occupied(Entry { key, value, hash }),
+            Bucket::Occupied(Entry { key, value }),
         );
 
         match existing {
@@ -150,6 +149,10 @@ where
 
     pub fn len(&self) -> usize {
         self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
     }
 
     pub fn iter<'a>(&'a self) -> Iter<'a, K, V> {
@@ -403,13 +406,10 @@ mod tests {
 
         // then
         for i in 0..1_0000 {
-            assert_eq!(
-                got_pairs.contains(&Pair {
-                    key: &i.to_string(),
-                    value: &i
-                }),
-                true
-            );
+            assert!(got_pairs.contains(&Pair {
+                key: &i.to_string(),
+                value: &i
+            }));
         }
     }
 }
